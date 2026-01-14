@@ -6,18 +6,21 @@ projet_sauvetage/
     code_to_text.py
     notebook/
         Data_Load.ipynb
+        test_LSTM.ipynb
         BlackScholes.ipynb
     data/
-        data.csv
+        train_data.csv
+        test_data.csv
     src/
+        deep_hedger.py
+        hedging_engine.py
         analytics_models.py
-        data_BS.py
         market_simulator.py
 
 ==================================================
 
 #### CONTENU DU FICHIER : main.py ####
-
+def bite ():
 #### FIN DU FICHIER : main.py ####
 
 #### CONTENU DU FICHIER : code_to_text.py ####
@@ -120,6 +123,11 @@ if __name__ == "__main__":
 
 #### FIN DU FICHIER : notebook/Data_Load.ipynb ####
 
+#### CONTENU DU FICHIER : notebook/test_LSTM.ipynb ####
+[Erreur lors de la lecture du Notebook : Notebook does not appear to be JSON: '']
+
+#### FIN DU FICHIER : notebook/test_LSTM.ipynb ####
+
 #### CONTENU DU FICHIER : notebook/BlackScholes.ipynb ####
 --- Cellule 0 [MARKDOWN] ---
 # Black Scholes
@@ -180,13 +188,270 @@ plt.show()
 
 #### FIN DU FICHIER : notebook/BlackScholes.ipynb ####
 
+#### CONTENU DU FICHIER : src/deep_hedger.py ####
+import torch
+import torch.nn as nn
+
+class DeepHedgingModel(nn.Module):
+    """
+    Réseau de neurones récurrent pour le Deep Hedging.
+    Architecture : LSTM + Couches Denses (MLP).
+    Objectif : Prédire le Delta optimal à chaque pas de temps.
+    """
+    def __init__(self, input_dim=3, hidden_dim=32, num_layers=2, output_dim=1):
+        super(DeepHedgingModel, self).__init__()
+        
+        # --- 1. Extraction de Features (Le "Cerveau" Récurrent) ---
+        # Le LSTM prend la séquence temporelle et met à jour sa mémoire interne.
+        # input_dim : Nombre de features (Prix, Temps restant, Volatilité...)
+        # hidden_dim : Taille de la mémoire du réseau
+        self.lstm = nn.LSTM(
+            input_size=input_dim, 
+            hidden_size=hidden_dim, 
+            num_layers=num_layers, 
+            batch_first=True
+        )
+        
+        # --- 2. Prise de Décision (Le "Bras" qui agit) ---
+        # Un petit réseau dense (MLP) qui prend la sortie du LSTM
+        # et décide de l'action finale (Delta).
+        self.decision_layer = nn.Sequential(
+            nn.Linear(hidden_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, output_dim),
+            nn.Sigmoid() # Force la sortie entre 0 et 1 (car un Delta est souvent entre 0 et 100%)
+        )
+
+    def forward(self, x, prev_position=None):
+        """
+        Passe avant (Forward pass).
+        
+        Args:
+            x (Tensor): État du marché [Batch, Sequence_Len, Features]
+            prev_position (Tensor): (Optionnel) Position précédente pour gérer les coûts.
+            
+        Returns:
+            deltas (Tensor): Séquence des positions de couverture [Batch, Sequence_Len, 1]
+        """
+        # 1. Passage dans le LSTM
+        # out contient la "compréhension" du marché par le réseau à chaque pas de temps
+        lstm_out, _ = self.lstm(x) 
+        
+        # 2. Passage dans le MLP décisionnel
+        # On applique la décision à chaque étape temporelle
+        deltas = self.decision_layer(lstm_out)
+        
+        return deltas
+
+# --- Test rapide pour vérifier que les dimensions collent ---
+if __name__ == "__main__":
+    # Simulation d'un batch de données
+    batch_size = 64
+    seq_len = 30     # 30 jours
+    n_features = 3   # (Log-Price, Time-to-Maturity, Volatility)
+    
+    # Création du modèle
+    model = DeepHedgingModel(input_dim=n_features)
+    
+    # Création d'une entrée aléatoire (Dummy data)
+    dummy_input = torch.randn(batch_size, seq_len, n_features)
+    
+    # Passage dans le modèle
+    output = model(dummy_input)
+    
+    print(f"Input shape  : {dummy_input.shape}") # [64, 30, 3]
+    print(f"Output shape : {output.shape}")      # [64, 30, 1]
+    print("✅ Le modèle fonctionne techniquement (les dimensions sont correctes).")
+#### FIN DU FICHIER : src/deep_hedger.py ####
+
+#### CONTENU DU FICHIER : src/hedging_engine.py ####
+import torch
+import torch.nn as nn
+import numpy as np
+
+class HedgingEngine:
+    """
+    Le Gymnase : Gère la simulation, le calcul du PnL (Profits & Pertes) 
+    et l'apprentissage du modèle avec prise en compte des frictions.
+    """
+    def __init__(self, model, optimizer, criterion, transaction_cost_pct=0.0):
+        """
+        Args:
+            model: Le réseau de neurones (DeepHedger)
+            optimizer: L'optimiseur (Adam)
+            criterion: La fonction de perte de base (souvent MSE)
+            transaction_cost_pct (float): Coûts de transaction (ex: 0.001 pour 0.1%)
+        """
+        self.model = model
+        self.optimizer = optimizer
+        self.criterion = criterion
+        self.cost_pct = transaction_cost_pct
+
+    def _compute_pnl(self, spot_paths, strikes, deltas, T):
+        """
+        Calcule le PnL (Profit and Loss) final de la stratégie de couverture.
+        C'est le calcul financier pur.
+        """
+        # 1. Calcul des variations de prix (dS) : S(t+1) - S(t)
+        # spot_paths shape: [Batch, Time]
+        price_changes = torch.diff(spot_paths, dim=1) 
+        
+        # 2. Alignement des deltas
+        # On utilise le delta décidé en t pour profiter du mouvement entre t et t+1
+        # On coupe le dernier delta car il ne sert à rien à la maturité
+        active_deltas = deltas[:, :-1, 0] 
+        
+        # 3. Profit généré par la stratégie de hedging (Gain sur actions)
+        # Somme (Quantité détenue * Variation de prix)
+        hedging_pnl = torch.sum(active_deltas * price_changes, dim=1)
+        
+        # 4. Calcul des coûts de transaction
+        # Coût = |Delta_t - Delta_{t-1}| * Prix_t * Taux_Frais
+        # On ajoute une colonne de zéros au début pour le premier achat
+        zeros = torch.zeros((deltas.shape[0], 1, 1), device=deltas.device)
+        padded_deltas = torch.cat([zeros, deltas], dim=1)
+        
+        # Changement de position
+        delta_changes = torch.abs(torch.diff(padded_deltas, dim=1))
+        
+        # On simplifie en appliquant les frais sur le prix moyen ou spot instantané
+        # Ici on applique sur le spot path aligné
+        costs = torch.sum(delta_changes[:, :-1, 0] * spot_paths[:, :-1] * self.cost_pct, dim=1)
+        
+        # 5. Payoff de l'option (Ce qu'on doit payer au client à la fin)
+        # Payoff Call = Max(S_T - K, 0)
+        final_prices = spot_paths[:, -1]
+        option_payoff = torch.relu(final_prices - strikes)
+        
+        # 6. PnL Total = Premium (vendu au début) + Hedging PnL - Costs - Payoff (payé à la fin)
+        # Note : Pour l'entraînement, on cherche juste à minimiser la variance entre 
+        # (Hedging - Costs) et (Payoff). On ignore souvent le Premium car c'est une constante.
+        
+        return hedging_pnl - costs - option_payoff
+
+    def train_step(self, spot_paths, strikes, inputs):
+        """
+        Une étape d'entraînement (Forward + Backward).
+        """
+        self.model.train() # Mode entraînement (active Dropouts etc)
+        self.optimizer.zero_grad() # Reset des gradients
+        
+        # 1. Forward Pass : Le modèle décide des deltas
+        deltas = self.model(inputs)
+        
+        # 2. Calcul du PnL résultant de ces décisions
+        pnl = self._compute_pnl(spot_paths, strikes, deltas, T=1.0)
+        
+        # 3. Calcul de la Loss (Fonction de perte)
+        # Objectif : Minimiser la variance du PnL (Risque)
+        # On veut que le PnL soit le plus constant possible (Hedging parfait)
+        loss = torch.var(pnl) # Variance Pure
+        
+        # 4. Backward Pass (Mise à jour des poids)
+        loss.backward()
+        self.optimizer.step()
+        
+        return loss.item(), pnl.mean().item()
+
+# --- Test rapide de la logique de calcul ---
+if __name__ == "__main__":
+    # Simulation de données factices
+    batch_sz = 5
+    seq_len = 10
+    
+    # Prix qui montent de 100 à 110
+    spots = torch.linspace(100, 110, seq_len).repeat(batch_sz, 1)
+    strikes = torch.full((batch_sz,), 100.0)
+    
+    # Deltas factices (Le modèle achète 0.5 action et garde)
+    deltas = torch.full((batch_sz, seq_len, 1), 0.5)
+    
+    # Instance Engine (sans modèle pour tester juste la méthode statique PnL)
+    engine = HedgingEngine(None, None, None, transaction_cost_pct=0.01)
+    
+    # Calcul PnL
+    pnl = engine._compute_pnl(spots, strikes, deltas, T=1.0)
+    
+    print(f"PnL Batch shape : {pnl.shape}")
+    print(f"PnL Moyen : {pnl.mean().item():.2f}")
+    print("✅ Le moteur de calcul financier fonctionne.")
+#### FIN DU FICHIER : src/hedging_engine.py ####
+
 #### CONTENU DU FICHIER : src/analytics_models.py ####
+import numpy as np
+from scipy.stats import norm
 
+class BlackScholesOracle:
+    """
+    L'Oracle : Implémente la formule fermée de Black-Scholes pour le pricing.
+    Supporte la vectorisation (entrées sous forme de tableaux NumPy).
+    """
+    
+    @staticmethod
+    def get_price(S, K, T, r, sigma, option_type='call'):
+        """
+        Calcule le prix d'une option européenne.
+        
+        Args:
+            S (float or array): Prix actuel du sous-jacent (Spot)
+            K (float or array): Prix d'exercice (Strike)
+            T (float or array): Temps restant jusqu'à maturité (en années)
+            r (float or array): Taux d'intérêt sans risque
+            sigma (float or array): Volatilité du sous-jacent
+            option_type (str): 'call' ou 'put'
+            
+        Returns:
+            float or array: Prix de l'option
+        """
+        # Pour éviter la division par zéro si T=0
+        T = np.maximum(T, 1e-8)
+        
+        # Calcul de d1 et d2
+        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        
+        if option_type.lower() == 'call':
+            price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+        elif option_type.lower() == 'put':
+            price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+        else:
+            raise ValueError("option_type doit être 'call' ou 'put'")
+            
+        return price
+
+    @staticmethod
+    def get_delta(S, K, T, r, sigma, option_type='call'):
+        """
+        Calcule le Delta de l'option (utile pour la comparaison en Semaine 3).
+        Delta = dV/dS (sensibilité du prix de l'option au prix du sous-jacent).
+        """
+        T = np.maximum(T, 1e-8)
+        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+        
+        if option_type.lower() == 'call':
+            return norm.cdf(d1)
+        else:
+            return norm.cdf(d1) - 1
+
+# --- Petit script de test ---
+if __name__ == "__main__":
+    # Test unitaire
+    S, K, T, r, sigma = 100, 100, 1, 0.05, 0.2
+    
+    call_price = BlackScholesOracle.get_price(S, K, T, r, sigma, 'call')
+    put_price = BlackScholesOracle.get_price(S, K, T, r, sigma, 'put')
+    delta_call = BlackScholesOracle.get_delta(S, K, T, r, sigma, 'call')
+    
+    print(f"Test pour S=100, K=100, T=1an, r=5%, sigma=20%:")
+    print(f"  - Prix du Call : {call_price:.4f}")
+    print(f"  - Prix du Put  : {put_price:.4f}")
+    print(f"  - Delta du Call: {delta_call:.4f}")
+
+    # Test de vectorisation (calculer 3 prix d'un coup)
+    S_vec = np.array([90, 100, 110])
+    prices = BlackScholesOracle.get_price(S_vec, K, T, r, sigma)
+    print(f"\nTest vectorisation (3 prix) : {prices}")
 #### FIN DU FICHIER : src/analytics_models.py ####
-
-#### CONTENU DU FICHIER : src/data_BS.py ####
-
-#### FIN DU FICHIER : src/data_BS.py ####
 
 #### CONTENU DU FICHIER : src/market_simulator.py ####
 import numpy as np

@@ -64,27 +64,34 @@ class HedgingEngine:
 
     def train_step(self, spot_paths, strikes, inputs):
         """
-        Une étape d'entraînement (Forward + Backward).
+        Une étape d'entraînement avec la nouvelle Loss Function.
         """
-        self.model.train() # Mode entraînement (active Dropouts etc)
-        self.optimizer.zero_grad() # Reset des gradients
+        self.model.train()
+        self.optimizer.zero_grad()
         
-        # 1. Forward Pass : Le modèle décide des deltas
+        # 1. L'IA décide
         deltas = self.model(inputs)
         
-        # 2. Calcul du PnL résultant de ces décisions
+        # 2. On calcule le résultat financier
         pnl = self._compute_pnl(spot_paths, strikes, deltas, T=1.0)
         
-        # 3. Calcul de la Loss (Fonction de perte)
-        # Objectif : Minimiser la variance du PnL (Risque)
-        # On veut que le PnL soit le plus constant possible (Hedging parfait)
-        loss = torch.var(pnl) # Variance Pure
+        # 3. NOUVELLE LOSS FUNCTION (Mean-Variance Optimization)
+        # On veut :
+        #   - Minimiser le Risque (Variance)
+        #   - Maximiser le Gain (Moyenne)
+        # Donc on minimise : Variance - lambda * Moyenne
         
-        # 4. Backward Pass (Mise à jour des poids)
+        risk = torch.var(pnl)      # Risque (Stabilité)
+        reward = torch.mean(pnl)   # Profit (Économies de frais)
+        
+        # La formule magique :
+        loss = risk - (self.risk_aversion * reward)
+        
+        # 4. Optimisation
         loss.backward()
         self.optimizer.step()
         
-        return loss.item(), pnl.mean().item()
+        return loss.item(), reward.item()
 
 # --- Test rapide de la logique de calcul ---
 if __name__ == "__main__":
