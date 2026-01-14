@@ -334,55 +334,58 @@ import torch
 import torch.nn as nn
 
 class DeepHedgingModel(nn.Module):
-    """
-    Réseau de neurones récurrent pour le Deep Hedging.
-    Architecture : LSTM + Couches Denses (MLP).
-    Objectif : Prédire le Delta optimal à chaque pas de temps.
-    """
-    def __init__(self, input_dim=3, hidden_dim=32, num_layers=2, output_dim=1):
+    def __init__(self, input_dim=3, hidden_dim=32, output_dim=1):
         super(DeepHedgingModel, self).__init__()
+        self.hidden_dim = hidden_dim
         
-        # --- 1. Extraction de Features (Le "Cerveau" Récurrent) ---
-        # Le LSTM prend la séquence temporelle et met à jour sa mémoire interne.
-        # input_dim : Nombre de features (Prix, Temps restant, Volatilité...)
-        # hidden_dim : Taille de la mémoire du réseau
-        self.lstm = nn.LSTM(
-            input_size=input_dim, 
-            hidden_size=hidden_dim, 
-            num_layers=num_layers, 
-            batch_first=True
-        )
+        # On ajoute +1 à l'input_dim pour inclure le "Previous Delta"
+        self.lstm_cell = nn.LSTMCell(input_size=input_dim + 1, hidden_size=hidden_dim)
         
-        # --- 2. Prise de Décision (Le "Bras" qui agit) ---
-        # Un petit réseau dense (MLP) qui prend la sortie du LSTM
-        # et décide de l'action finale (Delta).
         self.decision_layer = nn.Sequential(
             nn.Linear(hidden_dim, 32),
             nn.ReLU(),
             nn.Linear(32, output_dim),
-            nn.Sigmoid() # Force la sortie entre 0 et 1 (car un Delta est souvent entre 0 et 100%)
+            nn.Sigmoid() 
         )
 
-    def forward(self, x, prev_position=None):
+    def forward(self, x, initial_position=None):
         """
-        Passe avant (Forward pass).
+        x shape: [Batch, Time, Features]
+        """
+        batch_size, seq_len, _ = x.size()
         
-        Args:
-            x (Tensor): État du marché [Batch, Sequence_Len, Features]
-            prev_position (Tensor): (Optionnel) Position précédente pour gérer les coûts.
+        # Initialisation des états cachés (h_t, c_t)
+        h_t = torch.zeros(batch_size, self.hidden_dim, device=x.device)
+        c_t = torch.zeros(batch_size, self.hidden_dim, device=x.device)
+        
+        # Position initiale (0 actions au début)
+        if initial_position is None:
+            prev_delta = torch.zeros(batch_size, 1, device=x.device)
+        else:
+            prev_delta = initial_position
+
+        deltas = []
+        
+        # --- BOUCLE TEMPORELLE (On avance jour après jour) ---
+        for t in range(seq_len):
+            # 1. On récupère les features du marché du jour t
+            market_features = x[:, t, :] # [Batch, Features]
             
-        Returns:
-            deltas (Tensor): Séquence des positions de couverture [Batch, Sequence_Len, 1]
-        """
-        # 1. Passage dans le LSTM
-        # out contient la "compréhension" du marché par le réseau à chaque pas de temps
-        lstm_out, _ = self.lstm(x) 
-        
-        # 2. Passage dans le MLP décisionnel
-        # On applique la décision à chaque étape temporelle
-        deltas = self.decision_layer(lstm_out)
-        
-        return deltas
+            # 2. On concatène avec la position de la veille (L'IA sait ce qu'elle a en poche)
+            combined_input = torch.cat([market_features, prev_delta], dim=1) 
+            
+            # 3. Update de la mémoire LSTM
+            h_t, c_t = self.lstm_cell(combined_input, (h_t, c_t))
+            
+            # 4. Décision d'action
+            current_delta = self.decision_layer(h_t)
+            
+            # 5. On sauvegarde pour la boucle suivante et pour la sortie
+            prev_delta = current_delta
+            deltas.append(current_delta)
+            
+        # On recolle tout sous forme [Batch, Time, 1]
+        return torch.stack(deltas, dim=1)
 
 # --- Test rapide pour vérifier que les dimensions collent ---
 if __name__ == "__main__":
@@ -472,32 +475,28 @@ class HedgingEngine:
         return hedging_pnl - costs - option_payoff
 
     def train_step(self, spot_paths, strikes, inputs):
-        """
-        Une étape d'entraînement avec la nouvelle Loss Function.
-        """
         self.model.train()
         self.optimizer.zero_grad()
         
-        # 1. L'IA décide
+        # 1. Forward
         deltas = self.model(inputs)
         
-        # 2. On calcule le résultat financier
+        # 2. Compute PnL
         pnl = self._compute_pnl(spot_paths, strikes, deltas, T=1.0)
         
-        # 3. NOUVELLE LOSS FUNCTION (Mean-Variance Optimization)
-        # On veut :
-        #   - Minimiser le Risque (Variance)
-        #   - Maximiser le Gain (Moyenne)
-        # Donc on minimise : Variance - lambda * Moyenne
-        
-        risk = torch.var(pnl)      # Risque (Stabilité)
-        reward = torch.mean(pnl)   # Profit (Économies de frais)
-        
-        # La formule magique :
+        # 3. Loss (Mean-Variance)
+        risk = torch.var(pnl)
+        reward = torch.mean(pnl)
         loss = risk - (self.risk_aversion * reward)
         
-        # 4. Optimisation
+        # 4. Backward
         loss.backward()
+        
+        # --- AJOUT CRUCIAL ICI : GRADIENT CLIPPING ---
+        # Cela empêche les gradients d'exploser et calme les oscillations
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        # ---------------------------------------------
+        
         self.optimizer.step()
         
         return loss.item(), reward.item()
