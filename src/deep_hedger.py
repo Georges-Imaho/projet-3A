@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class DeepHedgingModel(nn.Module):
-    def __init__(self, input_dim=3, hidden_dim=32, output_dim=1):
+    def __init__(self, input_dim=4, hidden_dim=32, output_dim=1):
         super(DeepHedgingModel, self).__init__()
         self.hidden_dim = hidden_dim
         
@@ -54,23 +54,37 @@ class DeepHedgingModel(nn.Module):
             
         # On recolle tout sous forme [Batch, Time, 1]
         return torch.stack(deltas, dim=1)
-
 # --- Test rapide pour vérifier que les dimensions collent ---
 if __name__ == "__main__":
-    # Simulation d'un batch de données
+    print("--- Test du DeepHedgingModel (Architecture Récurrente) ---")
+    
+    # 1. Paramètres de simulation
     batch_size = 64
     seq_len = 30     # 30 jours
     n_features = 3   # (Log-Price, Time-to-Maturity, Volatility)
     
-    # Création du modèle
-    model = DeepHedgingModel(input_dim=n_features)
+    # 2. Création du modèle
+    # Note : On déclare input_dim=3, mais le modèle sait qu'il doit attendre 4 entrées
+    # (3 features marché + 1 position précédente) grâce à la modif dans __init__
+    model = DeepHedgingModel(input_dim=n_features, hidden_dim=32, output_dim=1)
     
-    # Création d'une entrée aléatoire (Dummy data)
+    # 3. Création d'une entrée aléatoire (Dummy data)
+    # Shape : [Batch, Sequence Length, Features]
     dummy_input = torch.randn(batch_size, seq_len, n_features)
     
-    # Passage dans le modèle
-    output = model(dummy_input)
-    
-    print(f"Input shape  : {dummy_input.shape}") # [64, 30, 3]
-    print(f"Output shape : {output.shape}")      # [64, 30, 1]
-    print("✅ Le modèle fonctionne techniquement (les dimensions sont correctes).")
+    # 4. Passage dans le modèle
+    try:
+        output = model(dummy_input)
+        
+        print(f"Input shape  : {dummy_input.shape}") # Doit être [64, 30, 3]
+        print(f"Output shape : {output.shape}")      # Doit être [64, 30, 1]
+        
+        if output.shape == (batch_size, seq_len, 1):
+            print("✅ SUCCÈS : Le modèle fonctionne techniquement.")
+            print("   -> La boucle temporelle a correctement intégré le 'Delta Précédent' à chaque étape.")
+        else:
+            print("❌ ÉCHEC : Les dimensions de sortie ne sont pas celles attendues.")
+            
+    except RuntimeError as e:
+        print(f"❌ ERREUR CRITIQUE pendant le forward : {e}")
+        print("   -> Vérifie la ligne 'torch.cat' ou la taille de 'self.lstm_cell'.")
