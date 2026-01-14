@@ -70,28 +70,39 @@ class HedgingEngine:
         # risk_aversion (lambda) contrôle la peur du risque.
         # Plus il est haut, plus le modèle acceptera de payer des frais pour se couvrir.
         x = -self.risk_aversion * pnl
-        return torch.log(torch.mean(torch.exp(x))) / self.risk_aversion
 
-    def train_step(self, spot_paths, strikes, inputs, initial_prices): # Ajout argument
+        log_sum_exp = torch.logsumexp(x, dim=0)
+        n = torch.tensor(x.size(0), device=x.device, dtype=x.dtype)
+        
+        return (log_sum_exp - torch.log(n)) / self.risk_aversion
+    
+    def train_step(self, spot_paths, strikes, inputs, initial_prices):
         self.model.train()
         self.optimizer.zero_grad()
         
         deltas = self.model(inputs)
         
-        # On passe le prix initial (Premium)
         pnl = self._compute_pnl(spot_paths, strikes, deltas, T=1.0, initial_prices=initial_prices)
         
-        # --- NOUVELLE LOSS FUNCTION : MSE ---
-        # On veut que PnL soit 0 (Hedge parfait)
-        # C'est beaucoup plus stable que Mean-Variance pour l'apprentissage
-        
-        loss = self.entropic_loss(pnl)     
+        # Vérification de sécurité : Si on a un NaN dans le PnL, on le remplace
+        if torch.isnan(pnl).any():
+            print("⚠️ AVERTISSEMENT: NaNs détectés dans le PnL (Remplacés par 0)")
+            pnl = torch.nan_to_num(pnl, nan=0.0)
 
+        loss = self.entropic_loss(pnl)
+        
+        if torch.isnan(loss):
+            print("⚠️ AVERTISSEMENT: La Loss est NaN (Skip step)")
+            return 0.0, 0.0 # On ne fait pas de backward pour ne pas casser le modèle
+            
         loss.backward()
+        
+        # CLIPPING DE GRADIENT (Indispensable pour éviter les explosions)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        
         self.optimizer.step()
         
-        return loss.item(), torch.mean(pnl).item() 
+        return loss.item(), torch.mean(pnl).item()
     
 # --- Test rapide de la logique de calcul ---
 if __name__ == "__main__":
