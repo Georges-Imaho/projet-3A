@@ -13,9 +13,8 @@ class DeepHedgingModel(nn.Module):
         self.lstm_cell = nn.LSTMCell(input_size=input_dim + 1, hidden_size=hidden_dim)
         
         self.decision_layer = nn.Sequential(
-            nn.Linear(hidden_dim, 32),
-            nn.ReLU(),
-            nn.Linear(32, output_dim),
+            nn.Linear(hidden_dim, output_dim),
+  
             nn.Sigmoid() # On revient à Sigmoid (plus stable pour le gradient que Hardtanh ici)
         )
 
