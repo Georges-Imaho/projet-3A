@@ -3,103 +3,58 @@ import torch.nn as nn
 import numpy as np
 
 class HedgingEngine:
-    """
-    Le Gymnase : Gère la simulation, le calcul du PnL (Profits & Pertes) 
-    et l'apprentissage du modèle avec prise en compte des frictions.
-    """
     def __init__(self, model, optimizer, criterion, transaction_cost_pct=0.0, risk_aversion=1.0):
-        """
-        Args:
-            model: Le réseau de neurones (DeepHedger)
-            optimizer: L'optimiseur (Adam)
-            criterion: La fonction de perte de base (souvent MSE)
-            transaction_cost_pct (float): Coûts de transaction (ex: 0.001 pour 0.1%)
-        """
         self.model = model
         self.optimizer = optimizer
-        self.criterion = criterion
+        # self.criterion n'est plus utilisé directement, on gère en interne
         self.cost_pct = transaction_cost_pct
         self.risk_aversion = risk_aversion
 
-    def _compute_pnl(self, spot_paths, strikes, deltas, T, initial_prices = None):
-        """
-        Calcule le PnL (Profit and Loss) final de la stratégie de couverture.
-        C'est le calcul financier pur.
-        """
-        # 1. Calcul des variations de prix (dS) : S(t+1) - S(t)
-        # spot_paths shape: [Batch, Time]
-        price_changes = torch.diff(spot_paths, dim=1) 
-        
-        # 2. Alignement des deltas
-        # On utilise le delta décidé en t pour profiter du mouvement entre t et t+1
-        # On coupe le dernier delta car il ne sert à rien à la maturité
-        active_deltas = deltas[:, :-1, 0] 
-        
-        # 3. Profit généré par la stratégie de hedging (Gain sur actions)
-        # Somme (Quantité détenue * Variation de prix)
+    # ... (Garde ta méthode _compute_pnl et entropic_loss EXACTEMENT comme avant) ...
+    def _compute_pnl(self, spot_paths, strikes, deltas, T, initial_prices=None):
+        # ... (Ton code précédent pour _compute_pnl) ...
+        # (Copie-colle le bloc précédent ici, je l'abrége pour la clarté)
+        price_changes = torch.diff(spot_paths, dim=1)
+        active_deltas = deltas[:, :-1, 0]
         hedging_pnl = torch.sum(active_deltas * price_changes, dim=1)
-        
-        # 4. Calcul des coûts de transaction
-        # Coût = |Delta_t - Delta_{t-1}| * Prix_t * Taux_Frais
-        # On ajoute une colonne de zéros au début pour le premier achat
         zeros = torch.zeros((deltas.shape[0], 1, 1), device=deltas.device)
         padded_deltas = torch.cat([zeros, deltas], dim=1)
-        
-        # Changement de position
         delta_changes = torch.abs(torch.diff(padded_deltas, dim=1))
-        
-        # On simplifie en appliquant les frais sur le prix moyen ou spot instantané
-        # Ici on applique sur le spot path aligné
         costs = torch.sum(delta_changes[:, :-1, 0] * spot_paths[:, :-1] * self.cost_pct, dim=1)
-        
-        # 5. Payoff de l'option (Ce qu'on doit payer au client à la fin)
-        # Payoff Call = Max(S_T - K, 0)
         final_prices = spot_paths[:, -1]
         option_payoff = torch.relu(final_prices - strikes)
-        
-        if initial_prices is None:
-            initial_prices = torch.zeros_like(option_payoff)
-            
+        if initial_prices is None: initial_prices = torch.zeros_like(option_payoff)
         return initial_prices + hedging_pnl - costs - option_payoff
-    
-    def entropic_loss(self, pnl):
-        """
-        Implémente l'utilité exponentielle : -E[-exp(-lambda * PnL)]
-        C'est LA fonction de perte standard pour le Deep Hedging avec frictions.
-        """
-        # risk_aversion (lambda) contrôle la peur du risque.
-        # Plus il est haut, plus le modèle acceptera de payer des frais pour se couvrir.
-        x = -self.risk_aversion * pnl
 
+    def entropic_loss(self, pnl):
+        x = -self.risk_aversion * pnl
+        # Clamp pour éviter l'explosion (Sécurité ultime)
+        x = torch.clamp(x, max=50.0) 
         log_sum_exp = torch.logsumexp(x, dim=0)
         n = torch.tensor(x.size(0), device=x.device, dtype=x.dtype)
-        
         return (log_sum_exp - torch.log(n)) / self.risk_aversion
-    
-    def train_step(self, spot_paths, strikes, inputs, initial_prices):
+
+    def train_step(self, spot_paths, strikes, inputs, initial_prices, use_mse=False):
         self.model.train()
         self.optimizer.zero_grad()
         
         deltas = self.model(inputs)
-        
         pnl = self._compute_pnl(spot_paths, strikes, deltas, T=1.0, initial_prices=initial_prices)
         
-        # Vérification de sécurité : Si on a un NaN dans le PnL, on le remplace
         if torch.isnan(pnl).any():
-            print("⚠️ AVERTISSEMENT: NaNs détectés dans le PnL (Remplacés par 0)")
             pnl = torch.nan_to_num(pnl, nan=0.0)
 
-        loss = self.entropic_loss(pnl)
+        # --- LE CŒUR DE LA CORRECTION ---
+        if use_mse:
+            # Mode "Échauffement" : On veut juste que PnL soit proche de 0
+            # C'est très stable numériquement.
+            loss = torch.mean(pnl**2)
+        else:
+            # Mode "Performance" : Une fois stable, on optimise l'utilité
+            loss = self.entropic_loss(pnl)
         
-        if torch.isnan(loss):
-            print("⚠️ AVERTISSEMENT: La Loss est NaN (Skip step)")
-            return 0.0, 0.0 # On ne fait pas de backward pour ne pas casser le modèle
-            
         loss.backward()
-        
-        # CLIPPING DE GRADIENT (Indispensable pour éviter les explosions)
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) # Clip plus strict
         self.optimizer.step()
         
         return loss.item(), torch.mean(pnl).item()

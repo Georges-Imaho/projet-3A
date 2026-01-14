@@ -5,6 +5,8 @@ class DeepHedgingModel(nn.Module):
     def __init__(self, input_dim=4, hidden_dim=32, output_dim=1):
         super(DeepHedgingModel, self).__init__()
         self.hidden_dim = hidden_dim
+
+        self.bn = nn.BatchNorm1d(input_dim + 1)
         
         # On ajoute +1 à l'input_dim pour inclure le "Previous Delta"
         self.lstm_cell = nn.LSTMCell(input_size=input_dim + 1, hidden_size=hidden_dim)
@@ -41,6 +43,8 @@ class DeepHedgingModel(nn.Module):
             
             # 2. On concatène avec la position de la veille (L'IA sait ce qu'elle a en poche)
             combined_input = torch.cat([market_features, prev_delta], dim=1) 
+
+            combined_input = self.bn(combined_input)
             
             # 3. Update de la mémoire LSTM
             h_t, c_t = self.lstm_cell(combined_input, (h_t, c_t))
