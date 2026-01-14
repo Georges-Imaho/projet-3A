@@ -1182,6 +1182,7 @@ plt.show()
 #### FIN DU FICHIER : notebook/projet-3A/notebook/BlackScholes.ipynb ####
 
 #### CONTENU DU FICHIER : notebook/projet-3A/src/deep_hedger.py ####
+#### REMPLACE TOUT LE CONTENU DE : src/deep_hedger.py ####
 import torch
 import torch.nn as nn
 
@@ -1189,30 +1190,27 @@ class DeepHedgingModel(nn.Module):
     def __init__(self, input_dim=4, hidden_dim=32, output_dim=1):
         super(DeepHedgingModel, self).__init__()
         self.hidden_dim = hidden_dim
-
+        
+        # Normalisation (Batch Norm) pour stabiliser les inputs (Prix vs Temps vs Vol)
         self.bn = nn.BatchNorm1d(input_dim + 1)
         
-        # On ajoute +1 à l'input_dim pour inclure le "Previous Delta"
         self.lstm_cell = nn.LSTMCell(input_size=input_dim + 1, hidden_size=hidden_dim)
         
         self.decision_layer = nn.Sequential(
             nn.Linear(hidden_dim, 32),
             nn.ReLU(),
             nn.Linear(32, output_dim),
-            nn.Sigmoid() 
+            # REMPLACEMENT MAJEUR : Hardtanh au lieu de Sigmoid
+            # Ça force la sortie entre 0 et 1 mais garde des gradients forts
+            nn.Hardtanh(0.0, 1.0) 
         )
 
     def forward(self, x, initial_position=None):
-        """
-        x shape: [Batch, Time, Features]
-        """
         batch_size, seq_len, _ = x.size()
         
-        # Initialisation des états cachés (h_t, c_t)
         h_t = torch.zeros(batch_size, self.hidden_dim, device=x.device)
         c_t = torch.zeros(batch_size, self.hidden_dim, device=x.device)
         
-        # Position initiale (0 actions au début)
         if initial_position is None:
             prev_delta = torch.zeros(batch_size, 1, device=x.device)
         else:
@@ -1220,65 +1218,24 @@ class DeepHedgingModel(nn.Module):
 
         deltas = []
         
-        # --- BOUCLE TEMPORELLE (On avance jour après jour) ---
         for t in range(seq_len):
-            # 1. On récupère les features du marché du jour t
-            market_features = x[:, t, :] # [Batch, Features]
+            market_features = x[:, t, :]
             
-            # 2. On concatène avec la position de la veille (L'IA sait ce qu'elle a en poche)
-            combined_input = torch.cat([market_features, prev_delta], dim=1) 
-
+            # Concaténation + Normalisation
+            combined_input = torch.cat([market_features, prev_delta], dim=1)
             combined_input = self.bn(combined_input)
             
-            # 3. Update de la mémoire LSTM
             h_t, c_t = self.lstm_cell(combined_input, (h_t, c_t))
-            
-            # 4. Décision d'action
             current_delta = self.decision_layer(h_t)
             
-            # 5. On sauvegarde pour la boucle suivante et pour la sortie
             prev_delta = current_delta
             deltas.append(current_delta)
             
-        # On recolle tout sous forme [Batch, Time, 1]
         return torch.stack(deltas, dim=1)
-# --- Test rapide pour vérifier que les dimensions collent ---
-if __name__ == "__main__":
-    print("--- Test du DeepHedgingModel (Architecture Récurrente) ---")
-    
-    # 1. Paramètres de simulation
-    batch_size = 64
-    seq_len = 30     # 30 jours
-    n_features = 3   # (Log-Price, Time-to-Maturity, Volatility)
-    
-    # 2. Création du modèle
-    # Note : On déclare input_dim=3, mais le modèle sait qu'il doit attendre 4 entrées
-    # (3 features marché + 1 position précédente) grâce à la modif dans __init__
-    model = DeepHedgingModel(input_dim=n_features, hidden_dim=32, output_dim=1)
-    
-    # 3. Création d'une entrée aléatoire (Dummy data)
-    # Shape : [Batch, Sequence Length, Features]
-    dummy_input = torch.randn(batch_size, seq_len, n_features)
-    
-    # 4. Passage dans le modèle
-    try:
-        output = model(dummy_input)
-        
-        print(f"Input shape  : {dummy_input.shape}") # Doit être [64, 30, 3]
-        print(f"Output shape : {output.shape}")      # Doit être [64, 30, 1]
-        
-        if output.shape == (batch_size, seq_len, 1):
-            print("✅ SUCCÈS : Le modèle fonctionne techniquement.")
-            print("   -> La boucle temporelle a correctement intégré le 'Delta Précédent' à chaque étape.")
-        else:
-            print("❌ ÉCHEC : Les dimensions de sortie ne sont pas celles attendues.")
-            
-    except RuntimeError as e:
-        print(f"❌ ERREUR CRITIQUE pendant le forward : {e}")
-        print("   -> Vérifie la ligne 'torch.cat' ou la taille de 'self.lstm_cell'.")
 #### FIN DU FICHIER : notebook/projet-3A/src/deep_hedger.py ####
 
 #### CONTENU DU FICHIER : notebook/projet-3A/src/hedging_engine.py ####
+#### REMPLACE TOUT LE CONTENU DE : src/hedging_engine.py ####
 import torch
 import torch.nn as nn
 import numpy as np
@@ -1287,32 +1244,41 @@ class HedgingEngine:
     def __init__(self, model, optimizer, criterion, transaction_cost_pct=0.0, risk_aversion=1.0):
         self.model = model
         self.optimizer = optimizer
-        # self.criterion n'est plus utilisé directement, on gère en interne
         self.cost_pct = transaction_cost_pct
         self.risk_aversion = risk_aversion
+        # HuberLoss est beaucoup plus stable que MSE pour le début
+        self.warmup_criterion = nn.SmoothL1Loss() 
 
-    # ... (Garde ta méthode _compute_pnl et entropic_loss EXACTEMENT comme avant) ...
     def _compute_pnl(self, spot_paths, strikes, deltas, T, initial_prices=None):
-        # ... (Ton code précédent pour _compute_pnl) ...
-        # (Copie-colle le bloc précédent ici, je l'abrége pour la clarté)
         price_changes = torch.diff(spot_paths, dim=1)
         active_deltas = deltas[:, :-1, 0]
+        
         hedging_pnl = torch.sum(active_deltas * price_changes, dim=1)
+        
+        # Calcul des frais de transaction
         zeros = torch.zeros((deltas.shape[0], 1, 1), device=deltas.device)
         padded_deltas = torch.cat([zeros, deltas], dim=1)
         delta_changes = torch.abs(torch.diff(padded_deltas, dim=1))
         costs = torch.sum(delta_changes[:, :-1, 0] * spot_paths[:, :-1] * self.cost_pct, dim=1)
+        
         final_prices = spot_paths[:, -1]
         option_payoff = torch.relu(final_prices - strikes)
-        if initial_prices is None: initial_prices = torch.zeros_like(option_payoff)
+        
+        if initial_prices is None:
+            initial_prices = torch.zeros_like(option_payoff)
+            
         return initial_prices + hedging_pnl - costs - option_payoff
 
     def entropic_loss(self, pnl):
+        # 1. Scaling pour éviter l'overflow
+        # Si le PnL est trop grand, l'exponentielle explose. On clamp.
         x = -self.risk_aversion * pnl
-        # Clamp pour éviter l'explosion (Sécurité ultime)
-        x = torch.clamp(x, max=50.0) 
+        x = torch.clamp(x, max=80.0) # exp(80) est la limite float32 safe
+        
+        # 2. LogSumExp Trick
         log_sum_exp = torch.logsumexp(x, dim=0)
         n = torch.tensor(x.size(0), device=x.device, dtype=x.dtype)
+        
         return (log_sum_exp - torch.log(n)) / self.risk_aversion
 
     def train_step(self, spot_paths, strikes, inputs, initial_prices, use_mse=False):
@@ -1322,46 +1288,29 @@ class HedgingEngine:
         deltas = self.model(inputs)
         pnl = self._compute_pnl(spot_paths, strikes, deltas, T=1.0, initial_prices=initial_prices)
         
+        # Sécurité Anti-NaN
         if torch.isnan(pnl).any():
             pnl = torch.nan_to_num(pnl, nan=0.0)
 
-        # --- LE CŒUR DE LA CORRECTION ---
         if use_mse:
-            # Mode "Échauffement" : On veut juste que PnL soit proche de 0
-            # C'est très stable numériquement.
-            loss = torch.mean(pnl**2)
+            # On utilise SmoothL1 au lieu de MSE pure pour éviter l'explosion
+            # On vise PnL = 0 (Perfect Hedge)
+            target = torch.zeros_like(pnl)
+            loss = self.warmup_criterion(pnl, target)
         else:
-            # Mode "Performance" : Une fois stable, on optimise l'utilité
             loss = self.entropic_loss(pnl)
         
+        if torch.isnan(loss):
+            return 0.0, 0.0 # On skip le step si NaN
+            
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) # Clip plus strict
+        
+        # Clipping très agressif pour forcer la stabilité
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.1)
+        
         self.optimizer.step()
         
         return loss.item(), torch.mean(pnl).item()
-    
-# --- Test rapide de la logique de calcul ---
-if __name__ == "__main__":
-    # Simulation de données factices
-    batch_sz = 5
-    seq_len = 10
-    
-    # Prix qui montent de 100 à 110
-    spots = torch.linspace(100, 110, seq_len).repeat(batch_sz, 1)
-    strikes = torch.full((batch_sz,), 100.0)
-    
-    # Deltas factices (Le modèle achète 0.5 action et garde)
-    deltas = torch.full((batch_sz, seq_len, 1), 0.5)
-    
-    # Instance Engine (sans modèle pour tester juste la méthode statique PnL)
-    engine = HedgingEngine(None, None, None, transaction_cost_pct=0.01)
-    
-    # Calcul PnL
-    pnl = engine._compute_pnl(spots, strikes, deltas, T=1.0)
-    
-    print(f"PnL Batch shape : {pnl.shape}")
-    print(f"PnL Moyen : {pnl.mean().item():.2f}")
-    print("✅ Le moteur de calcul financier fonctionne.")
 #### FIN DU FICHIER : notebook/projet-3A/src/hedging_engine.py ####
 
 #### CONTENU DU FICHIER : notebook/projet-3A/src/analytics_models.py ####
@@ -1542,6 +1491,7 @@ if __name__ == "__main__":
 #### FIN DU FICHIER : notebook/projet-3A/src/market_simulator.py ####
 
 #### CONTENU DU FICHIER : src/deep_hedger.py ####
+#### REMPLACE TOUT LE CONTENU DE : src/deep_hedger.py ####
 import torch
 import torch.nn as nn
 
@@ -1549,30 +1499,27 @@ class DeepHedgingModel(nn.Module):
     def __init__(self, input_dim=4, hidden_dim=32, output_dim=1):
         super(DeepHedgingModel, self).__init__()
         self.hidden_dim = hidden_dim
-
+        
+        # Normalisation (Batch Norm) pour stabiliser les inputs (Prix vs Temps vs Vol)
         self.bn = nn.BatchNorm1d(input_dim + 1)
         
-        # On ajoute +1 à l'input_dim pour inclure le "Previous Delta"
         self.lstm_cell = nn.LSTMCell(input_size=input_dim + 1, hidden_size=hidden_dim)
         
         self.decision_layer = nn.Sequential(
             nn.Linear(hidden_dim, 32),
             nn.ReLU(),
             nn.Linear(32, output_dim),
-            nn.Sigmoid() 
+            # REMPLACEMENT MAJEUR : Hardtanh au lieu de Sigmoid
+            # Ça force la sortie entre 0 et 1 mais garde des gradients forts
+            nn.Hardtanh(0.0, 1.0) 
         )
 
     def forward(self, x, initial_position=None):
-        """
-        x shape: [Batch, Time, Features]
-        """
         batch_size, seq_len, _ = x.size()
         
-        # Initialisation des états cachés (h_t, c_t)
         h_t = torch.zeros(batch_size, self.hidden_dim, device=x.device)
         c_t = torch.zeros(batch_size, self.hidden_dim, device=x.device)
         
-        # Position initiale (0 actions au début)
         if initial_position is None:
             prev_delta = torch.zeros(batch_size, 1, device=x.device)
         else:
@@ -1580,65 +1527,24 @@ class DeepHedgingModel(nn.Module):
 
         deltas = []
         
-        # --- BOUCLE TEMPORELLE (On avance jour après jour) ---
         for t in range(seq_len):
-            # 1. On récupère les features du marché du jour t
-            market_features = x[:, t, :] # [Batch, Features]
+            market_features = x[:, t, :]
             
-            # 2. On concatène avec la position de la veille (L'IA sait ce qu'elle a en poche)
-            combined_input = torch.cat([market_features, prev_delta], dim=1) 
-
+            # Concaténation + Normalisation
+            combined_input = torch.cat([market_features, prev_delta], dim=1)
             combined_input = self.bn(combined_input)
             
-            # 3. Update de la mémoire LSTM
             h_t, c_t = self.lstm_cell(combined_input, (h_t, c_t))
-            
-            # 4. Décision d'action
             current_delta = self.decision_layer(h_t)
             
-            # 5. On sauvegarde pour la boucle suivante et pour la sortie
             prev_delta = current_delta
             deltas.append(current_delta)
             
-        # On recolle tout sous forme [Batch, Time, 1]
         return torch.stack(deltas, dim=1)
-# --- Test rapide pour vérifier que les dimensions collent ---
-if __name__ == "__main__":
-    print("--- Test du DeepHedgingModel (Architecture Récurrente) ---")
-    
-    # 1. Paramètres de simulation
-    batch_size = 64
-    seq_len = 30     # 30 jours
-    n_features = 3   # (Log-Price, Time-to-Maturity, Volatility)
-    
-    # 2. Création du modèle
-    # Note : On déclare input_dim=3, mais le modèle sait qu'il doit attendre 4 entrées
-    # (3 features marché + 1 position précédente) grâce à la modif dans __init__
-    model = DeepHedgingModel(input_dim=n_features, hidden_dim=32, output_dim=1)
-    
-    # 3. Création d'une entrée aléatoire (Dummy data)
-    # Shape : [Batch, Sequence Length, Features]
-    dummy_input = torch.randn(batch_size, seq_len, n_features)
-    
-    # 4. Passage dans le modèle
-    try:
-        output = model(dummy_input)
-        
-        print(f"Input shape  : {dummy_input.shape}") # Doit être [64, 30, 3]
-        print(f"Output shape : {output.shape}")      # Doit être [64, 30, 1]
-        
-        if output.shape == (batch_size, seq_len, 1):
-            print("✅ SUCCÈS : Le modèle fonctionne techniquement.")
-            print("   -> La boucle temporelle a correctement intégré le 'Delta Précédent' à chaque étape.")
-        else:
-            print("❌ ÉCHEC : Les dimensions de sortie ne sont pas celles attendues.")
-            
-    except RuntimeError as e:
-        print(f"❌ ERREUR CRITIQUE pendant le forward : {e}")
-        print("   -> Vérifie la ligne 'torch.cat' ou la taille de 'self.lstm_cell'.")
 #### FIN DU FICHIER : src/deep_hedger.py ####
 
 #### CONTENU DU FICHIER : src/hedging_engine.py ####
+#### REMPLACE TOUT LE CONTENU DE : src/hedging_engine.py ####
 import torch
 import torch.nn as nn
 import numpy as np
@@ -1647,32 +1553,41 @@ class HedgingEngine:
     def __init__(self, model, optimizer, criterion, transaction_cost_pct=0.0, risk_aversion=1.0):
         self.model = model
         self.optimizer = optimizer
-        # self.criterion n'est plus utilisé directement, on gère en interne
         self.cost_pct = transaction_cost_pct
         self.risk_aversion = risk_aversion
+        # HuberLoss est beaucoup plus stable que MSE pour le début
+        self.warmup_criterion = nn.SmoothL1Loss() 
 
-    # ... (Garde ta méthode _compute_pnl et entropic_loss EXACTEMENT comme avant) ...
     def _compute_pnl(self, spot_paths, strikes, deltas, T, initial_prices=None):
-        # ... (Ton code précédent pour _compute_pnl) ...
-        # (Copie-colle le bloc précédent ici, je l'abrége pour la clarté)
         price_changes = torch.diff(spot_paths, dim=1)
         active_deltas = deltas[:, :-1, 0]
+        
         hedging_pnl = torch.sum(active_deltas * price_changes, dim=1)
+        
+        # Calcul des frais de transaction
         zeros = torch.zeros((deltas.shape[0], 1, 1), device=deltas.device)
         padded_deltas = torch.cat([zeros, deltas], dim=1)
         delta_changes = torch.abs(torch.diff(padded_deltas, dim=1))
         costs = torch.sum(delta_changes[:, :-1, 0] * spot_paths[:, :-1] * self.cost_pct, dim=1)
+        
         final_prices = spot_paths[:, -1]
         option_payoff = torch.relu(final_prices - strikes)
-        if initial_prices is None: initial_prices = torch.zeros_like(option_payoff)
+        
+        if initial_prices is None:
+            initial_prices = torch.zeros_like(option_payoff)
+            
         return initial_prices + hedging_pnl - costs - option_payoff
 
     def entropic_loss(self, pnl):
+        # 1. Scaling pour éviter l'overflow
+        # Si le PnL est trop grand, l'exponentielle explose. On clamp.
         x = -self.risk_aversion * pnl
-        # Clamp pour éviter l'explosion (Sécurité ultime)
-        x = torch.clamp(x, max=50.0) 
+        x = torch.clamp(x, max=80.0) # exp(80) est la limite float32 safe
+        
+        # 2. LogSumExp Trick
         log_sum_exp = torch.logsumexp(x, dim=0)
         n = torch.tensor(x.size(0), device=x.device, dtype=x.dtype)
+        
         return (log_sum_exp - torch.log(n)) / self.risk_aversion
 
     def train_step(self, spot_paths, strikes, inputs, initial_prices, use_mse=False):
@@ -1682,46 +1597,29 @@ class HedgingEngine:
         deltas = self.model(inputs)
         pnl = self._compute_pnl(spot_paths, strikes, deltas, T=1.0, initial_prices=initial_prices)
         
+        # Sécurité Anti-NaN
         if torch.isnan(pnl).any():
             pnl = torch.nan_to_num(pnl, nan=0.0)
 
-        # --- LE CŒUR DE LA CORRECTION ---
         if use_mse:
-            # Mode "Échauffement" : On veut juste que PnL soit proche de 0
-            # C'est très stable numériquement.
-            loss = torch.mean(pnl**2)
+            # On utilise SmoothL1 au lieu de MSE pure pour éviter l'explosion
+            # On vise PnL = 0 (Perfect Hedge)
+            target = torch.zeros_like(pnl)
+            loss = self.warmup_criterion(pnl, target)
         else:
-            # Mode "Performance" : Une fois stable, on optimise l'utilité
             loss = self.entropic_loss(pnl)
         
+        if torch.isnan(loss):
+            return 0.0, 0.0 # On skip le step si NaN
+            
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) # Clip plus strict
+        
+        # Clipping très agressif pour forcer la stabilité
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.1)
+        
         self.optimizer.step()
         
         return loss.item(), torch.mean(pnl).item()
-    
-# --- Test rapide de la logique de calcul ---
-if __name__ == "__main__":
-    # Simulation de données factices
-    batch_sz = 5
-    seq_len = 10
-    
-    # Prix qui montent de 100 à 110
-    spots = torch.linspace(100, 110, seq_len).repeat(batch_sz, 1)
-    strikes = torch.full((batch_sz,), 100.0)
-    
-    # Deltas factices (Le modèle achète 0.5 action et garde)
-    deltas = torch.full((batch_sz, seq_len, 1), 0.5)
-    
-    # Instance Engine (sans modèle pour tester juste la méthode statique PnL)
-    engine = HedgingEngine(None, None, None, transaction_cost_pct=0.01)
-    
-    # Calcul PnL
-    pnl = engine._compute_pnl(spots, strikes, deltas, T=1.0)
-    
-    print(f"PnL Batch shape : {pnl.shape}")
-    print(f"PnL Moyen : {pnl.mean().item():.2f}")
-    print("✅ Le moteur de calcul financier fonctionne.")
 #### FIN DU FICHIER : src/hedging_engine.py ####
 
 #### CONTENU DU FICHIER : src/analytics_models.py ####
