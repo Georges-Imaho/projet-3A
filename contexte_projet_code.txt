@@ -119,7 +119,148 @@ if __name__ == "__main__":
 #### FIN DU FICHIER : code_to_text.py ####
 
 #### CONTENU DU FICHIER : notebook/Data_Load.ipynb ####
-[Erreur lors de la lecture du Notebook : Notebook does not appear to be JSON: '']
+--- Cellule 0 [CODE] ---
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+import sys
+
+# --- 1. CONFIGURATION DU CHEMIN ---
+# Le notebook est dans "notebook/", les modules dans "src/"
+# On ajoute le dossier racine (..) au path pour pouvoir faire "from src..."
+project_root = os.path.abspath('..')
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+# --- 2. CRÉATION DU DOSSIER DATA ---
+DATA_DIR = os.path.join(project_root, "data")
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
+    print(f"📂 Dossier créé : {DATA_DIR}")
+else:
+    print(f"📂 Dossier données détecté : {DATA_DIR}")
+
+# --- 3. IMPORTS DES MODULES DU PROJET ---
+try:
+    # Attention : vérifie si ton fichier s'appelle market_simulator.py ou market_simulators.py
+    # D'après ton arborescence, c'est le singulier : market_simulator
+    from src.market_simulator import MarketSimulator
+    from src.analytics_models import BlackScholesOracle
+    print("✅ Imports des modules src réussis !")
+except ImportError as e:
+    print(f"❌ Erreur d'import : {e}")
+    print("Vérifie que les fichiers .py sont bien dans le dossier '../src/'")
+
+# Config graphique
+sns.set_theme(style="whitegrid")
+plt.rcParams['figure.figsize'] = (12, 6)
+
+--- Cellule 1 [CODE] ---
+# --- TEST VISUEL : SIMULATEUR DE MARCHÉ (GBM) ---
+
+# Paramètres
+S0 = 100       # Prix initial
+T = 1.0        # 1 an
+N_STEPS = 252  # Jours de bourse
+N_PATHS = 10   # Nombre de courbes à afficher
+
+# Instanciation
+sim = MarketSimulator(s0=S0, r=0.05, sigma=0.2)
+
+# Génération
+paths = sim.simulate_gbm(steps=N_STEPS, n_paths=N_PATHS)
+
+# Visualisation
+plt.figure(figsize=(10, 6))
+plt.plot(paths)
+plt.title(f"Simulation de {N_PATHS} trajectoires (Mouvement Brownien Géométrique)")
+plt.xlabel("Jours de trading")
+plt.ylabel("Prix ($)")
+plt.axhline(y=S0, color='black', linestyle='--', label="Prix Initial")
+plt.legend()
+plt.show()
+
+--- Cellule 2 [CODE] ---
+# --- GÉNÉRATION DU DATASET (100 000 SCÉNARIOS) ---
+
+N_SAMPLES = 100000
+print(f"🚀 Génération de {N_SAMPLES} options...")
+
+np.random.seed(42) # Reproductibilité
+
+# 1. Inputs aléatoires (X)
+S = np.random.uniform(50, 150, N_SAMPLES)      # Spot Price
+K = np.random.uniform(50, 150, N_SAMPLES)      # Strike Price
+T = np.random.uniform(0.1, 2.0, N_SAMPLES)     # Maturité (années)
+r = np.random.uniform(0.01, 0.05, N_SAMPLES)   # Taux (1% - 5%)
+sigma = np.random.uniform(0.1, 0.5, N_SAMPLES) # Volatilité (10% - 50%)
+
+# 2. Calcul du Label (Y) avec l'Oracle que tu viens de coder
+# On calcule le prix du CALL
+calls = BlackScholesOracle.get_price(S, K, T, r, sigma, option_type='call')
+
+# 3. Création du DataFrame
+df = pd.DataFrame({
+    'S': S, 'K': K, 'T': T, 'r': r, 'sigma': sigma,
+    'call_price': calls
+})
+
+# Feature Engineering simple (utile pour l'analyse)
+df['moneyness'] = df['S'] / df['K']
+
+print("Aperçu des données générées :")
+display(df.head())
+
+--- Cellule 3 [CODE] ---
+# --- SAUVEGARDE (TRAIN / TEST SPLIT) ---
+
+# Mélange des données
+df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+
+# Séparation 80% / 20%
+split_idx = int(0.8 * len(df))
+train_df = df.iloc[:split_idx]
+test_df = df.iloc[split_idx:]
+
+# Chemins de sauvegarde
+train_path = os.path.join(DATA_DIR, "train_data.csv")
+test_path = os.path.join(DATA_DIR, "test_data.csv")
+
+train_df.to_csv(train_path, index=False)
+test_df.to_csv(test_path, index=False)
+
+print(f"✅ Fichiers sauvegardés avec succès !")
+print(f"   Train : {train_path} ({len(train_df)} lignes)")
+print(f"   Test  : {test_path} ({len(test_df)} lignes)")
+
+--- Cellule 4 [CODE] ---
+# --- ANALYSE DES DONNÉES GÉNÉRÉES ---
+
+fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+# 1. Relation Prix Spot vs Prix Option
+# On prend un échantillon aléatoire de 2000 points pour ne pas surcharger le graph
+sample = df.sample(2000) 
+sns.scatterplot(
+    data=sample, x='S', y='call_price', 
+    hue='moneyness', palette='viridis', ax=axes[0]
+)
+axes[0].set_title("Prix Call vs Spot (Coloré par Moneyness)")
+axes[0].set_xlabel("Spot Price ($)")
+axes[0].set_ylabel("Call Price ($)")
+
+# 2. Distribution des prix
+sns.histplot(df['call_price'], bins=50, ax=axes[1], color='purple', kde=True)
+axes[1].set_title("Distribution des Prix des Calls")
+axes[1].set_xlabel("Prix du Call")
+
+plt.tight_layout()
+plt.show()
+
+--- Cellule 5 [CODE] ---
+
 
 #### FIN DU FICHIER : notebook/Data_Load.ipynb ####
 
@@ -274,7 +415,7 @@ class HedgingEngine:
     Le Gymnase : Gère la simulation, le calcul du PnL (Profits & Pertes) 
     et l'apprentissage du modèle avec prise en compte des frictions.
     """
-    def __init__(self, model, optimizer, criterion, transaction_cost_pct=0.0):
+    def __init__(self, model, optimizer, criterion, transaction_cost_pct=0.0, risk_aversion=1.0):
         """
         Args:
             model: Le réseau de neurones (DeepHedger)
@@ -286,6 +427,7 @@ class HedgingEngine:
         self.optimizer = optimizer
         self.criterion = criterion
         self.cost_pct = transaction_cost_pct
+        self.risk_aversion = risk_aversion
 
     def _compute_pnl(self, spot_paths, strikes, deltas, T):
         """
@@ -331,27 +473,34 @@ class HedgingEngine:
 
     def train_step(self, spot_paths, strikes, inputs):
         """
-        Une étape d'entraînement (Forward + Backward).
+        Une étape d'entraînement avec la nouvelle Loss Function.
         """
-        self.model.train() # Mode entraînement (active Dropouts etc)
-        self.optimizer.zero_grad() # Reset des gradients
+        self.model.train()
+        self.optimizer.zero_grad()
         
-        # 1. Forward Pass : Le modèle décide des deltas
+        # 1. L'IA décide
         deltas = self.model(inputs)
         
-        # 2. Calcul du PnL résultant de ces décisions
+        # 2. On calcule le résultat financier
         pnl = self._compute_pnl(spot_paths, strikes, deltas, T=1.0)
         
-        # 3. Calcul de la Loss (Fonction de perte)
-        # Objectif : Minimiser la variance du PnL (Risque)
-        # On veut que le PnL soit le plus constant possible (Hedging parfait)
-        loss = torch.var(pnl) # Variance Pure
+        # 3. NOUVELLE LOSS FUNCTION (Mean-Variance Optimization)
+        # On veut :
+        #   - Minimiser le Risque (Variance)
+        #   - Maximiser le Gain (Moyenne)
+        # Donc on minimise : Variance - lambda * Moyenne
         
-        # 4. Backward Pass (Mise à jour des poids)
+        risk = torch.var(pnl)      # Risque (Stabilité)
+        reward = torch.mean(pnl)   # Profit (Économies de frais)
+        
+        # La formule magique :
+        loss = risk - (self.risk_aversion * reward)
+        
+        # 4. Optimisation
         loss.backward()
         self.optimizer.step()
         
-        return loss.item(), pnl.mean().item()
+        return loss.item(), reward.item()
 
 # --- Test rapide de la logique de calcul ---
 if __name__ == "__main__":
@@ -488,6 +637,62 @@ class MarketSimulator:
         paths = self.s0 * np.exp(np.vstack([np.zeros(n_paths), cum_log_returns]))
         
         return paths
+    
+    def simulate_heston(self, steps, n_paths=1, kappa=2.0, theta=0.2, xi=0.3, rho=-0.7):
+        """
+        Simule le modèle de Heston (Volatilité Stochastique).
+        
+        Args:
+            kappa (float): Vitesse de retour à la moyenne de la volatilité.
+            theta (float): Volatilité moyenne à long terme.
+            xi (float): "Volatilité de la volatilité" (nervosité du marché).
+            rho (float): Corrélation entre le prix et la volatilité (Souvent négative : quand le prix chute, la peur monte).
+        
+        Returns:
+            paths (ndarray): Prix de l'actif [steps+1, n_paths]
+            vol_paths (ndarray): Volatilité instantanée [steps+1, n_paths]
+        """
+        # 1. Génération des chocs aléatoires corrélés
+        # Z1 pour le prix, Z2 pour la volatilité
+        z1 = np.random.standard_normal((steps, n_paths))
+        z2_uncorrelated = np.random.standard_normal((steps, n_paths))
+        # Corrélation des browniens : W2 = rho*W1 + sqrt(1-rho^2)*Z2
+        z2 = rho * z1 + np.sqrt(1 - rho**2) * z2_uncorrelated
+
+        # 2. Initialisation des tableaux
+        # On a besoin de stocker la volatilité à chaque instant
+        price_paths = np.zeros((steps + 1, n_paths))
+        vol_paths = np.zeros((steps + 1, n_paths))
+        
+        # Conditions initiales
+        price_paths[0] = self.s0
+        vol_paths[0] = theta # On commence à la moyenne long terme (ex: 20%)
+
+        dt = self.dt
+        sqrt_dt = np.sqrt(dt)
+
+        # 3. Boucle temporelle (Euler-Maruyama)
+        # On ne peut pas tout vectoriser d'un coup car t dépend de t-1
+        for t in range(steps):
+            S_t = price_paths[t]
+            v_t = vol_paths[t]
+            
+            # S'assurer que la variance reste positive (Absorbtion ou Réflexion)
+            v_t = np.maximum(v_t, 1e-5) # Sécurité numérique
+            sqrt_vt = np.sqrt(v_t)
+
+            # Mise à jour de la Volatilité (Processus CIR)
+            # dv = kappa * (theta - v) * dt + xi * sqrt(v) * dW_vol
+            d_vol = kappa * (theta - v_t) * dt + xi * sqrt_vt * z2[t] * sqrt_dt
+            vol_paths[t+1] = v_t + d_vol
+            
+            # Mise à jour du Prix
+            # dS = r * S * dt + sqrt(v) * S * dW_price
+            d_price = self.r * S_t * dt + sqrt_vt * S_t * z1[t] * sqrt_dt
+            price_paths[t+1] = S_t + d_price
+
+        # On retourne les prix ET les volatilités (car le LSTM aura besoin de voir la vol)
+        return price_paths, np.sqrt(np.maximum(vol_paths, 1e-5))
 
 # Exemple d'utilisation rapide pour tester :
 if __name__ == "__main__":
