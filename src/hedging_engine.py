@@ -7,7 +7,7 @@ class HedgingEngine:
     Le Gymnase : Gère la simulation, le calcul du PnL (Profits & Pertes) 
     et l'apprentissage du modèle avec prise en compte des frictions.
     """
-    def __init__(self, model, optimizer, criterion, transaction_cost_pct=0.0):
+    def __init__(self, model, optimizer, criterion, transaction_cost_pct=0.0, risk_aversion=1.0):
         """
         Args:
             model: Le réseau de neurones (DeepHedger)
@@ -19,6 +19,7 @@ class HedgingEngine:
         self.optimizer = optimizer
         self.criterion = criterion
         self.cost_pct = transaction_cost_pct
+        self.risk_aversion = risk_aversion
 
     def _compute_pnl(self, spot_paths, strikes, deltas, T):
         """
