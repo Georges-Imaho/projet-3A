@@ -61,6 +61,16 @@ class HedgingEngine:
             initial_prices = torch.zeros_like(option_payoff)
             
         return initial_prices + hedging_pnl - costs - option_payoff
+    
+    def entropic_loss(self, pnl):
+        """
+        Implémente l'utilité exponentielle : -E[-exp(-lambda * PnL)]
+        C'est LA fonction de perte standard pour le Deep Hedging avec frictions.
+        """
+        # risk_aversion (lambda) contrôle la peur du risque.
+        # Plus il est haut, plus le modèle acceptera de payer des frais pour se couvrir.
+        x = -self.risk_aversion * pnl
+        return torch.log(torch.mean(torch.exp(x))) / self.risk_aversion
 
     def train_step(self, spot_paths, strikes, inputs, initial_prices): # Ajout argument
         self.model.train()
@@ -74,8 +84,9 @@ class HedgingEngine:
         # --- NOUVELLE LOSS FUNCTION : MSE ---
         # On veut que PnL soit 0 (Hedge parfait)
         # C'est beaucoup plus stable que Mean-Variance pour l'apprentissage
-        loss = torch.mean(pnl**2) 
         
+        loss = self.entropic_loss(pnl)     
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
