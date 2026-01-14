@@ -478,28 +478,28 @@ class HedgingEngine:
         self.model.train()
         self.optimizer.zero_grad()
         
-        # 1. Forward
         deltas = self.model(inputs)
-        
-        # 2. Compute PnL
         pnl = self._compute_pnl(spot_paths, strikes, deltas, T=1.0)
         
-        # 3. Loss (Mean-Variance)
-        risk = torch.var(pnl)
-        reward = torch.mean(pnl)
+        # --- CORRECTION : NORMALISATION ---
+        # On divise le PnL par le Strike (K) pour travailler en %
+        # Exemple : PnL de 1$ sur Strike 100$ = 1%
+        normalized_pnl = pnl / strikes
+        
+        # On booste l'importance du Profit dans la Loss
+        # On veut que l'IA soit "gourmande"
+        risk = torch.var(normalized_pnl)
+        reward = torch.mean(normalized_pnl)
+        
+        # On force le ratio : on veut autant minimiser le risque que maximiser le profit
+        # Le facteur 1.0 ou 2.0 ici est crucial.
         loss = risk - (self.risk_aversion * reward)
         
-        # 4. Backward
         loss.backward()
-        
-        # --- AJOUT CRUCIAL ICI : GRADIENT CLIPPING ---
-        # Cela empêche les gradients d'exploser et calme les oscillations
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        # ---------------------------------------------
-        
         self.optimizer.step()
         
-        return loss.item(), reward.item()
+        return loss.item(), reward.item() # On renvoie le reward brut pour l'affichage
 
 # --- Test rapide de la logique de calcul ---
 if __name__ == "__main__":

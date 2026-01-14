@@ -21,7 +21,7 @@ class HedgingEngine:
         self.cost_pct = transaction_cost_pct
         self.risk_aversion = risk_aversion
 
-    def _compute_pnl(self, spot_paths, strikes, deltas, T):
+    def _compute_pnl(self, spot_paths, strikes, deltas, T, initial_prices = None):
         """
         Calcule le PnL (Profit and Loss) final de la stratégie de couverture.
         C'est le calcul financier pur.
@@ -57,39 +57,31 @@ class HedgingEngine:
         final_prices = spot_paths[:, -1]
         option_payoff = torch.relu(final_prices - strikes)
         
-        # 6. PnL Total = Premium (vendu au début) + Hedging PnL - Costs - Payoff (payé à la fin)
-        # Note : Pour l'entraînement, on cherche juste à minimiser la variance entre 
-        # (Hedging - Costs) et (Payoff). On ignore souvent le Premium car c'est une constante.
-        
-        return hedging_pnl - costs - option_payoff
+        if initial_prices is None:
+            initial_prices = torch.zeros_like(option_payoff)
+            
+        return initial_prices + hedging_pnl - costs - option_payoff
 
-    def train_step(self, spot_paths, strikes, inputs):
+    def train_step(self, spot_paths, strikes, inputs, initial_prices): # Ajout argument
         self.model.train()
         self.optimizer.zero_grad()
         
         deltas = self.model(inputs)
-        pnl = self._compute_pnl(spot_paths, strikes, deltas, T=1.0)
         
-        # --- CORRECTION : NORMALISATION ---
-        # On divise le PnL par le Strike (K) pour travailler en %
-        # Exemple : PnL de 1$ sur Strike 100$ = 1%
-        normalized_pnl = pnl / strikes
+        # On passe le prix initial (Premium)
+        pnl = self._compute_pnl(spot_paths, strikes, deltas, T=1.0, initial_prices=initial_prices)
         
-        # On booste l'importance du Profit dans la Loss
-        # On veut que l'IA soit "gourmande"
-        risk = torch.var(normalized_pnl)
-        reward = torch.mean(normalized_pnl)
-        
-        # On force le ratio : on veut autant minimiser le risque que maximiser le profit
-        # Le facteur 1.0 ou 2.0 ici est crucial.
-        loss = risk - (self.risk_aversion * reward)
+        # --- NOUVELLE LOSS FUNCTION : MSE ---
+        # On veut que PnL soit 0 (Hedge parfait)
+        # C'est beaucoup plus stable que Mean-Variance pour l'apprentissage
+        loss = torch.mean(pnl**2) 
         
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
         
-        return loss.item(), reward.item() # On renvoie le reward brut pour l'affichage
-
+        return loss.item(), torch.mean(pnl).item() 
+    
 # --- Test rapide de la logique de calcul ---
 if __name__ == "__main__":
     # Simulation de données factices
