@@ -64,32 +64,28 @@ class HedgingEngine:
         return hedging_pnl - costs - option_payoff
 
     def train_step(self, spot_paths, strikes, inputs):
-        """
-        Une étape d'entraînement avec la nouvelle Loss Function.
-        """
         self.model.train()
         self.optimizer.zero_grad()
         
-        # 1. L'IA décide
+        # 1. Forward
         deltas = self.model(inputs)
         
-        # 2. On calcule le résultat financier
+        # 2. Compute PnL
         pnl = self._compute_pnl(spot_paths, strikes, deltas, T=1.0)
         
-        # 3. NOUVELLE LOSS FUNCTION (Mean-Variance Optimization)
-        # On veut :
-        #   - Minimiser le Risque (Variance)
-        #   - Maximiser le Gain (Moyenne)
-        # Donc on minimise : Variance - lambda * Moyenne
-        
-        risk = torch.var(pnl)      # Risque (Stabilité)
-        reward = torch.mean(pnl)   # Profit (Économies de frais)
-        
-        # La formule magique :
+        # 3. Loss (Mean-Variance)
+        risk = torch.var(pnl)
+        reward = torch.mean(pnl)
         loss = risk - (self.risk_aversion * reward)
         
-        # 4. Optimisation
+        # 4. Backward
         loss.backward()
+        
+        # --- AJOUT CRUCIAL ICI : GRADIENT CLIPPING ---
+        # Cela empêche les gradients d'exploser et calme les oscillations
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        # ---------------------------------------------
+        
         self.optimizer.step()
         
         return loss.item(), reward.item()
